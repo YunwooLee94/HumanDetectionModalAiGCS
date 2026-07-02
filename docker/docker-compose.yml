@@ -25,6 +25,11 @@ services:
       # jemalloc: prevents glibc ptmalloc heap corruption when GLib (rtsrsrc),
       # FastRTPS, and CUDA allocate concurrently from multiple threads in Docker
       - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+      # CycloneDDS: jemalloc changes FastRTPS SharedMemory segment layout, so
+      # the host's FastRTPS (glibc allocator) reads invalid pointers from the
+      # container's shm segments → kernel panic → system shutdown.
+      # CycloneDDS uses only UDP by default, avoiding SharedMemory entirely.
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
     volumes:
       - ../scripts:/workspace/scripts:rw
       - ../configs:/workspace/configs:rw

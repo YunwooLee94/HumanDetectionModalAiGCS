@@ -7,8 +7,11 @@
 #   4. import gi.Gst     → GLib bindings must come AFTER both CUDA + DDS
 #   5. Gst.init(None)    → start GStreamer pipeline
 #
-# Importing gi.repository.Gst at the top-level crashes TRT or Node creation.
+# GStreamer capture runs in a dedicated thread so it never blocks the
+# ROS2 executor.  The frame queue holds at most one frame (latest wins).
 import os
+import queue
+import threading
 import yaml
 import cv2
 import numpy as np
@@ -16,7 +19,7 @@ from ultralytics import YOLO
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CompressedImage
 from vision_msgs.msg import Detection2DArray, Detection2D, ObjectHypothesisWithPose
 from cv_bridge import CvBridge
 
@@ -51,7 +54,7 @@ class DetectionNode(Node):
         pipeline_str = (
             f"rtspsrc location={rtsp_url} protocols=tcp latency=0 "
             f"! decodebin ! videoconvert ! video/x-raw,format=BGR "
-            f"! appsink name=sink drop=true sync=false"
+            f"! appsink name=sink drop=true sync=false max-buffers=1"
         )
         self.pipeline_str = pipeline_str
         self.pipeline = Gst.parse_launch(pipeline_str)
@@ -61,24 +64,59 @@ class DetectionNode(Node):
 
         self.bridge = CvBridge()
         self.image_pub = self.create_publisher(Image, "/drone/image_raw", 10)
+        self.image_compressed_pub = self.create_publisher(
+            CompressedImage, "/drone/image_raw/compressed", 10
+        )
         self.detection_pub = self.create_publisher(Detection2DArray, "/drone/detections", 10)
         self.overlay_pub = self.create_publisher(Image, "/drone/image_detections", 10)
+        self.overlay_compressed_pub = self.create_publisher(
+            CompressedImage, "/drone/image_detections/compressed", 10
+        )
+
+        # Frame queue: separate GStreamer capture thread → ROS2 publish thread
+        self._frame_queue: queue.Queue = queue.Queue(maxsize=1)
+        self._running = True
+        self._capture_thread = threading.Thread(
+            target=self._capture_loop, name="gst-capture", daemon=True
+        )
+        self._capture_thread.start()
+        self.get_logger().info("GStreamer capture thread started.")
 
         self.timer = self.create_timer(0.033, self.process_frame)
 
-    def pull_frame(self):
-        sample = self.appsink.emit("try-pull-sample", self.Gst.SECOND)
-        if not sample:
-            return None
-        buf = sample.get_buffer()
-        caps = sample.get_caps()
-        struct = caps.get_structure(0)
-        width = struct.get_value("width")
-        height = struct.get_value("height")
-        data = buf.extract_dup(0, buf.get_size())
-        return np.frombuffer(data, dtype=np.uint8).reshape((height, width, 3))
+    # ── GStreamer capture thread ──────────────────────────────────────────────
 
-    def restart_pipeline(self):
+    def _capture_loop(self):
+        Gst = self.Gst
+        timeout_count = 0
+        while self._running:
+            sample = self.appsink.emit("try-pull-sample", Gst.SECOND)
+            if sample is None:
+                timeout_count += 1
+                if timeout_count % 5 == 1:
+                    state = self.pipeline.get_state(0)
+                    self.get_logger().warn(
+                        f"No frame from appsink (miss #{timeout_count}), "
+                        f"pipeline state: {state[1].value_nick}"
+                    )
+                continue
+            timeout_count = 0
+            buf = sample.get_buffer()
+            caps = sample.get_caps()
+            struct = caps.get_structure(0)
+            width = struct.get_value("width")
+            height = struct.get_value("height")
+            data = buf.extract_dup(0, buf.get_size())
+            frame = np.frombuffer(data, dtype=np.uint8).reshape((height, width, 3))
+
+            # Replace stale frame so the timer always gets the newest one
+            try:
+                self._frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+            self._frame_queue.put(frame)
+
+    def _restart_pipeline(self):
         self.get_logger().warn("Restarting GStreamer pipeline...")
         self.pipeline.set_state(self.Gst.State.NULL)
         self.pipeline = self.Gst.parse_launch(self.pipeline_str)
@@ -87,19 +125,24 @@ class DetectionNode(Node):
         self.pipeline.set_state(self.Gst.State.PLAYING)
         self.get_logger().info("GStreamer pipeline restarted.")
 
+    # ── ROS2 timer callback ───────────────────────────────────────────────────
+
     def process_frame(self):
-        msg = self.bus.pop_filtered(self.Gst.MessageType.ERROR | self.Gst.MessageType.EOS)
+        msg = self.bus.pop_filtered(
+            self.Gst.MessageType.ERROR | self.Gst.MessageType.EOS
+        )
         if msg:
             if msg.type == self.Gst.MessageType.ERROR:
                 err, _ = msg.parse_error()
                 self.get_logger().error(f"GStreamer error: {err.message}")
             else:
                 self.get_logger().warn("GStreamer EOS received.")
-            self.restart_pipeline()
+            self._restart_pipeline()
             return
 
-        frame = self.pull_frame()
-        if frame is None:
+        try:
+            frame = self._frame_queue.get_nowait()
+        except queue.Empty:
             return
 
         stamp = self.get_clock().now().to_msg()
@@ -108,6 +151,12 @@ class DetectionNode(Node):
         img_msg.header.stamp = stamp
         img_msg.header.frame_id = "drone_camera"
         self.image_pub.publish(img_msg)
+
+        compressed_msg = CompressedImage()
+        compressed_msg.header = img_msg.header
+        compressed_msg.format = "jpeg"
+        compressed_msg.data = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
+        self.image_compressed_pub.publish(compressed_msg)
 
         results = self.model(frame, verbose=False)[0]
 
@@ -152,16 +201,29 @@ class DetectionNode(Node):
             y2 = int(cy + h / 2)
             score = det.results[0].hypothesis.score
             cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(overlay, f"person {score:.2f}", (x1, y1 - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(
+                overlay, f"person {score:.2f}", (x1, y1 - 8),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2,
+            )
 
         overlay_msg = self.bridge.cv2_to_imgmsg(overlay, encoding="bgr8")
         overlay_msg.header.stamp = stamp
         overlay_msg.header.frame_id = "drone_camera"
         self.overlay_pub.publish(overlay_msg)
 
+        overlay_compressed_msg = CompressedImage()
+        overlay_compressed_msg.header = overlay_msg.header
+        overlay_compressed_msg.format = "jpeg"
+        overlay_compressed_msg.data = cv2.imencode(".jpg", overlay, [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
+        self.overlay_compressed_pub.publish(overlay_compressed_msg)
+
     def destroy_node(self):
-        self.pipeline.set_state(self.Gst.State.NULL)
+        self._running = False
+        try:
+            self.pipeline.set_state(self.Gst.State.NULL)
+            self.pipeline.get_state(timeout=2 * self.Gst.SECOND)
+        except Exception:
+            pass
         super().destroy_node()
 
 

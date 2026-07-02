@@ -38,6 +38,7 @@ RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
         ros-humble-vision-msgs \
         ros-humble-cv-bridge \
         ros-humble-sensor-msgs \
+        ros-humble-rmw-cyclonedds-cpp \
         python3-colcon-common-extensions \
     && rm -rf /var/lib/apt/lists/*
 
@@ -87,4 +88,11 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 WORKDIR /workspace
+
+# ── Network utilities ─────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y \
+    net-tools \
+    iputils-ping \
+    && rm -rf /var/lib/apt/lists/*
+
 CMD ["/bin/bash"]

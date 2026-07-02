@@ -6,9 +6,15 @@ Real-time human detection from a drone RTSP stream using YOLO11 + TensorRT, publ
 
 | Topic | Type | Description |
 |-------|------|-------------|
-| `/drone/image_raw` | `sensor_msgs/Image` | Raw camera feed |
+| `/drone/image_raw` | `sensor_msgs/Image` | Raw camera feed (uncompressed) |
+| `/drone/image_raw/compressed` | `sensor_msgs/CompressedImage` | Raw camera feed — JPEG compressed, **lower latency over UDP** |
 | `/drone/detections` | `vision_msgs/Detection2DArray` | Person bounding boxes |
-| `/drone/image_detections` | `sensor_msgs/Image` | Camera feed with overlaid boxes |
+| `/drone/image_detections` | `sensor_msgs/Image` | Camera feed with overlaid boxes (uncompressed) |
+| `/drone/image_detections/compressed` | `sensor_msgs/CompressedImage` | Camera feed with overlaid boxes — JPEG compressed, **lower latency over UDP** |
+
+> When viewing from a host computer via `rqt_image_view`, use the `/compressed` topics.
+> They reduce data size ~15–20× (2.25 MB → ~120 KB per frame at JPEG quality 80),
+> significantly cutting the UDP transport latency introduced by the Docker boundary.
 
 ## Quick Start
 
@@ -100,3 +106,14 @@ All dependencies are installed inside the Docker container:
 The host machine requires:
 - Docker with NVIDIA Container Toolkit
 - NVIDIA GPU driver compatible with CUDA 12.8
+- **ROS2 Humble** with the following packages:
+
+```bash
+sudo apt install ros-humble-image-transport-plugins
+```
+
+`image-transport-plugins` provides the compressed image subscriber plugin required by `rqt_image_view` to display `/compressed` topics. Without it, `rqt_image_view` will show the error:
+
+```
+Unable to load plugin for transport 'image_transport/compressed_sub'
+```
