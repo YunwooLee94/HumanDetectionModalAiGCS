@@ -1,0 +1,7 @@
+drone:
+  ip: 192.168.8.197
+  rtsp_port: 8900
+  rtsp_path: /live
+
+model:
+  name: yolo11m   # choices: yolo11n, yolo11s, yolo11m, yolo11l, yolo11x

@@ -1,0 +1,22 @@
+# Model weights — keep the folder but ignore all files inside
+weights/*
+!weights/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# ROS2 logs
+~/.ros/log/
+log/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

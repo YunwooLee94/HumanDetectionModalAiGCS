@@ -1,0 +1,37 @@
+name: object-detection-modal-ai-gcs
+
+services:
+  object-detection:
+    image: object-detection-modal-ai:latest
+    container_name: object_detection_modal_ai_gcs
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: nvcr.io/nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    network_mode: host
+    privileged: true
+    environment:
+      - DISPLAY=${DISPLAY}
+      - XAUTHORITY=/root/.Xauthority
+      # jemalloc: prevents glibc ptmalloc heap corruption when GLib (rtsrsrc),
+      # FastRTPS, and CUDA allocate concurrently from multiple threads in Docker
+      - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+    volumes:
+      - ../scripts:/workspace/scripts:rw
+      - ../configs:/workspace/configs:rw
+      - ../weights:/workspace/weights:rw
+      - ${HOME}/.Xauthority:/root/.Xauthority:rw
+      - /tmp/.X11-unix:/tmp/.X11-unix:ro
+      - ./.bashrc:/root/.bashrc:rw
+    stdin_open: true
+    tty: true
+    command: /bin/bash
