@@ -40,6 +40,12 @@ Place the YOLO11 `.pt` file in the `weights/` directory:
 weights/yolo11m.pt
 ```
 
+The weights file is stored on airlab-storage:
+
+```
+chiron/humanflow/weights/yolo11m.pt
+```
+
 The TensorRT engine (`.engine`) is generated automatically on first run.
 
 ### 3. Build and start the container
